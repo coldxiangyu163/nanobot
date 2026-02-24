@@ -14,11 +14,6 @@ class CronTool(Tool):
     def __init__(self, cron_service: CronService):
         self._cron = cron_service
     
-    def set_context(self, channel: str, chat_id: str) -> None:
-        """Set the current session context via ContextVar."""
-        current_channel.set(channel)
-        current_chat_id.set(chat_id)
-    
     @property
     def name(self) -> str:
         return "cron"

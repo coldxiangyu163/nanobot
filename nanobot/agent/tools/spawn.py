@@ -15,11 +15,6 @@ class SpawnTool(Tool):
     def __init__(self, manager: "SubagentManager"):
         self._manager = manager
     
-    def set_context(self, channel: str, chat_id: str) -> None:
-        """Set the origin context via ContextVar."""
-        current_channel.set(channel)
-        current_chat_id.set(chat_id)
-    
     @property
     def name(self) -> str:
         return "spawn"
