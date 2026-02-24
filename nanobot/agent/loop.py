@@ -14,6 +14,7 @@ from loguru import logger
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.task_context import current_channel, current_chat_id, current_message_id, message_sent_in_turn
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
@@ -99,6 +100,10 @@ class AgentLoop:
         self._consolidating: set[str] = set()  # Session keys with consolidation in progress
         self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
         self._consolidation_locks: dict[str, asyncio.Lock] = {}
+        # Concurrent session processing
+        self._session_locks: dict[str, asyncio.Lock] = {}  # Per-session serialization
+        self._processing_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
+        self._concurrency_semaphore = asyncio.Semaphore(5)  # Max concurrent sessions
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -141,18 +146,10 @@ class AgentLoop:
             self._mcp_connecting = False
 
     def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
-        """Update context for all tools that need routing info."""
-        if message_tool := self.tools.get("message"):
-            if isinstance(message_tool, MessageTool):
-                message_tool.set_context(channel, chat_id, message_id)
-
-        if spawn_tool := self.tools.get("spawn"):
-            if isinstance(spawn_tool, SpawnTool):
-                spawn_tool.set_context(channel, chat_id)
-
-        if cron_tool := self.tools.get("cron"):
-            if isinstance(cron_tool, CronTool):
-                cron_tool.set_context(channel, chat_id)
+        """Update context for all tools that need routing info (via ContextVar)."""
+        current_channel.set(channel)
+        current_chat_id.set(chat_id)
+        current_message_id.set(message_id)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -249,6 +246,22 @@ class AgentLoop:
                     self.bus.consume_inbound(),
                     timeout=1.0
                 )
+                task = asyncio.create_task(self._dispatch(msg))
+                self._processing_tasks.add(task)
+                task.add_done_callback(self._processing_tasks.discard)
+            except asyncio.TimeoutError:
+                continue
+
+    async def _dispatch(self, msg: InboundMessage) -> None:
+        """Dispatch a message with per-session locking and concurrency control."""
+        session_key = msg.session_key
+        lock = self._session_locks.get(session_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_key] = lock
+
+        async with self._concurrency_semaphore:
+            async with lock:
                 try:
                     response = await self._process_message(msg)
                     if response is not None:
@@ -264,8 +277,10 @@ class AgentLoop:
                         chat_id=msg.chat_id,
                         content=f"Sorry, I encountered an error: {str(e)}"
                     ))
-            except asyncio.TimeoutError:
-                continue
+
+        # Prune lock if no longer in use
+        if not lock.locked():
+            self._session_locks.pop(session_key, None)
 
     async def close_mcp(self) -> None:
         """Close MCP connections."""
@@ -414,7 +429,7 @@ class AgentLoop:
         self.sessions.save(session)
 
         if message_tool := self.tools.get("message"):
-            if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+            if isinstance(message_tool, MessageTool) and message_tool.sent_in_turn:
                 return None
 
         return OutboundMessage(
