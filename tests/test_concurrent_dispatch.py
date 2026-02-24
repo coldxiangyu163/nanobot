@@ -145,8 +145,8 @@ class TestConcurrentDispatch:
         assert "boom" in error_msg.content
 
     @pytest.mark.asyncio
-    async def test_session_lock_pruned_after_use(self):
-        """Unused session locks should be cleaned up."""
+    async def test_session_locks_retained(self):
+        """Session locks should be retained to avoid race conditions on pruning."""
         from nanobot.agent.loop import AgentLoop
 
         loop = MagicMock(spec=AgentLoop)
@@ -163,4 +163,5 @@ class TestConcurrentDispatch:
         msg = _make_msg(chat_id="ephemeral")
         await AgentLoop._dispatch(loop, msg)
 
-        assert "feishu:ephemeral" not in loop._session_locks
+        # Lock should still exist (no racy pruning)
+        assert "feishu:ephemeral" in loop._session_locks

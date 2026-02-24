@@ -64,6 +64,7 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
+        max_concurrency: int = 5,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -102,9 +103,10 @@ class AgentLoop:
         self._mcp_connecting = False
         self._consolidating: set[str] = set()  # Session keys with consolidation in progress
         self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
-        self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
-        self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
-        self._processing_lock = asyncio.Lock()
+        self._consolidation_locks: dict[str, asyncio.Lock] = {}
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._dispatch_sem = asyncio.Semaphore(max_concurrency)
+        self._dispatch_tasks: set[asyncio.Task] = set()  # Strong refs to dispatch tasks
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -250,8 +252,6 @@ class AgentLoop:
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
-        self._session_locks: dict[str, asyncio.Lock] = {}
-        self._dispatch_sem = asyncio.Semaphore(5)
         await self._connect_mcp()
         logger.info("Agent loop started")
 
@@ -261,7 +261,9 @@ class AgentLoop:
                     self.bus.consume_inbound(),
                     timeout=1.0
                 )
-                asyncio.create_task(self._dispatch(msg))
+                task = asyncio.create_task(self._dispatch(msg))
+                self._dispatch_tasks.add(task)
+                task.add_done_callback(self._dispatch_tasks.discard)
             except asyncio.TimeoutError:
                 continue
 
@@ -273,8 +275,8 @@ class AgentLoop:
             self._session_locks[session_key] = asyncio.Lock()
         lock = self._session_locks[session_key]
 
-        async with self._dispatch_sem:
-            async with lock:
+        async with lock:
+            async with self._dispatch_sem:
                 try:
                     response = await self._process_message(msg)
                     if response is not None:
@@ -290,9 +292,6 @@ class AgentLoop:
                         chat_id=msg.chat_id,
                         content=f"Sorry, I encountered an error: {str(e)}"
                     ))
-            # Prune unused session lock (outside lock context)
-            if not lock.locked():
-                self._session_locks.pop(session_key, None)
 
             if msg.content.strip().lower() == "/stop":
                 await self._handle_stop(msg)
