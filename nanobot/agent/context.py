@@ -10,6 +10,7 @@ from typing import Any
 
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
+from nanobot.agent.skill_ranker import SkillRanker
 
 
 class ContextBuilder:
@@ -22,11 +23,25 @@ class ContextBuilder:
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
+        self.skill_ranker = SkillRanker(self.skills)
     
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
-        """Build the system prompt from identity, bootstrap files, memory, and skills."""
-        parts = [self._get_identity()]
-
+    def build_system_prompt(self, skill_names: list[str] | None = None, user_query: str | None = None) -> str:
+        """
+        Build the system prompt from bootstrap files, memory, and skills.
+        
+        Args:
+            skill_names: Optional list of skills to include.
+            user_query: Current user message for smart skill injection.
+        
+        Returns:
+            Complete system prompt.
+        """
+        parts = []
+        
+        # Core identity
+        parts.append(self._get_identity())
+        
+        # Bootstrap files
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
@@ -34,14 +49,30 @@ class ContextBuilder:
         memory = self.memory.get_memory_context()
         if memory:
             parts.append(f"# Memory\n\n{memory}")
-
+        
+        # Skills - smart injection
         always_skills = self.skills.get_always_skills()
-        if always_skills:
-            always_content = self.skills.load_skills_for_context(always_skills)
-            if always_content:
-                parts.append(f"# Active Skills\n\n{always_content}")
 
-        skills_summary = self.skills.build_skills_summary()
+        if user_query:
+            # Smart injection: always + top-K relevant skills get full content
+            inject_full, summary_only = self.skill_ranker.get_relevant_skills(
+                query=user_query,
+                always_skills=always_skills,
+                top_k=3,
+                threshold=0.05,
+            )
+        else:
+            # Fallback: only always skills get full content
+            inject_full = always_skills
+            summary_only = None
+
+        if inject_full:
+            full_content = self.skills.load_skills_for_context(inject_full)
+            if full_content:
+                parts.append(f"# Active Skills\n\n{full_content}")
+        
+        # Remaining skills: only show summary
+        skills_summary = self.skills.build_skills_summary(exclude=set(inject_full) if inject_full else None)
         if skills_summary:
             parts.append(f"""# Skills
 
@@ -111,13 +142,35 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         channel: str | None = None,
         chat_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Build the complete message list for an LLM call."""
-        return [
-            {"role": "system", "content": self.build_system_prompt(skill_names)},
-            *history,
-            {"role": "user", "content": self._build_runtime_context(channel, chat_id)},
-            {"role": "user", "content": self._build_user_content(current_message, media)},
-        ]
+        """
+        Build the complete message list for an LLM call.
+
+        Args:
+            history: Previous conversation messages.
+            current_message: The new user message.
+            skill_names: Optional skills to include.
+            media: Optional list of local file paths for images/media.
+            channel: Current channel (telegram, feishu, etc.).
+            chat_id: Current chat/user ID.
+
+        Returns:
+            List of messages including system prompt.
+        """
+        messages = []
+
+        # System prompt (with smart skill injection based on user query)
+        system_prompt = self.build_system_prompt(skill_names, user_query=current_message)
+        messages.append({"role": "system", "content": system_prompt})
+
+        # History
+        messages.extend(history)
+
+        # Current message (with optional image attachments)
+        user_content = self._build_user_content(current_message, media)
+        user_content = self._inject_runtime_context(user_content, channel, chat_id)
+        messages.append({"role": "user", "content": user_content})
+
+        return messages
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
         """Build user message content with optional base64-encoded images."""
