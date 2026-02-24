@@ -250,14 +250,49 @@ class AgentLoop:
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._dispatch_sem = asyncio.Semaphore(5)
         await self._connect_mcp()
         logger.info("Agent loop started")
 
         while self._running:
             try:
-                msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
+                msg = await asyncio.wait_for(
+                    self.bus.consume_inbound(),
+                    timeout=1.0
+                )
+                asyncio.create_task(self._dispatch(msg))
             except asyncio.TimeoutError:
                 continue
+
+    async def _dispatch(self, msg) -> None:
+        """Dispatch a message with per-session locking and global concurrency cap."""
+        session_key = f"{msg.channel}:{msg.chat_id}"
+        # Get or create per-session lock
+        if session_key not in self._session_locks:
+            self._session_locks[session_key] = asyncio.Lock()
+        lock = self._session_locks[session_key]
+
+        async with self._dispatch_sem:
+            async with lock:
+                try:
+                    response = await self._process_message(msg)
+                    if response is not None:
+                        await self.bus.publish_outbound(response)
+                    elif msg.channel == "cli":
+                        await self.bus.publish_outbound(OutboundMessage(
+                            channel=msg.channel, chat_id=msg.chat_id, content="", metadata=msg.metadata or {},
+                        ))
+                except Exception as e:
+                    logger.error("Error processing message: {}", e)
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=f"Sorry, I encountered an error: {str(e)}"
+                    ))
+            # Prune unused session lock (outside lock context)
+            if not lock.locked():
+                self._session_locks.pop(session_key, None)
 
             if msg.content.strip().lower() == "/stop":
                 await self._handle_stop(msg)
