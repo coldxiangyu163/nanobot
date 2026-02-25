@@ -101,6 +101,7 @@ class AgentLoop:
         self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
         self._consolidation_locks: dict[str, asyncio.Lock] = {}
         self._active_tasks: dict[str, asyncio.Task] = {}  # session_key -> running task
+        self._pending_tasks: set[asyncio.Task] = set()  # Strong refs until dispatch starts
         self._processing_lock = asyncio.Lock()  # Serialize message processing
         self._register_default_tools()
 
@@ -266,7 +267,9 @@ class AgentLoop:
 
                 # Regular messages (including non-immediate commands) are
                 # dispatched as tasks so the loop keeps consuming.
-                asyncio.create_task(self._dispatch(msg))
+                task = asyncio.create_task(self._dispatch(msg))
+                self._pending_tasks.add(task)
+                task.add_done_callback(self._pending_tasks.discard)
 
             except asyncio.TimeoutError:
                 continue
@@ -275,15 +278,24 @@ class AgentLoop:
         """Handle a command that must be processed while the agent may be busy."""
         if cmd == "/stop":
             task = self._active_tasks.get(msg.session_key)
+            sub_cancelled = await self.subagents.cancel_by_session(msg.session_key)
             if task and not task.done():
                 task.cancel()
                 try:
                     await task
                 except (asyncio.CancelledError, Exception):
                     pass
+                parts = ["⏹ Task stopped."]
+                if sub_cancelled:
+                    parts.append(f"Also stopped {sub_cancelled} background task(s).")
                 await self.bus.publish_outbound(OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id,
-                    content="⏹ Task stopped.",
+                    content=" ".join(parts),
+                ))
+            elif sub_cancelled:
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=f"⏹ Stopped {sub_cancelled} background task(s).",
                 ))
             else:
                 await self.bus.publish_outbound(OutboundMessage(
