@@ -1,4 +1,4 @@
-"""Agent loop: the core processing engine."""
+"Agent loop: the core processing engine."
 
 from __future__ import annotations
 
