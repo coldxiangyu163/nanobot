@@ -279,6 +279,7 @@ def gateway(
         provider=provider,
         workspace=config.workspace_path,
         model=config.agents.defaults.model,
+        fallbacks=config.agents.defaults.fallbacks,
         temperature=config.agents.defaults.temperature,
         max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
@@ -435,6 +436,7 @@ def agent(
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
+        fallbacks=config.agents.defaults.fallbacks,
         workspace=config.workspace_path,
         model=config.agents.defaults.model,
         temperature=config.agents.defaults.temperature,
@@ -926,6 +928,7 @@ def cron_run(
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
+        fallbacks=config.agents.defaults.fallbacks,
         workspace=config.workspace_path,
         model=config.agents.defaults.model,
         temperature=config.agents.defaults.temperature,
