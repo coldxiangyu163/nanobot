@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from nanobot.cron.service import CronService
@@ -72,3 +74,29 @@ def test_multi_instance_remove_does_not_clobber_other_jobs(tmp_path) -> None:
     reloaded = CronService(store_path)
     names = [j.name for j in reloaded.list_jobs(include_disabled=True)]
     assert names == ["second"]
+
+@pytest.mark.asyncio
+async def test_running_service_honors_external_disable(tmp_path) -> None:
+    store_path = tmp_path / "cron" / "jobs.json"
+    called: list[str] = []
+
+    async def on_job(job) -> None:
+        called.append(job.id)
+
+    service = CronService(store_path, on_job=on_job)
+    job = service.add_job(
+        name="external-disable",
+        schedule=CronSchedule(kind="every", every_ms=200),
+        message="hello",
+    )
+    await service.start()
+    try:
+        external = CronService(store_path)
+        updated = external.enable_job(job.id, enabled=False)
+        assert updated is not None
+        assert updated.enabled is False
+
+        await asyncio.sleep(0.35)
+        assert called == []
+    finally:
+        service.stop()
