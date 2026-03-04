@@ -99,6 +99,14 @@ Your workspace is at: {workspace_path}
 - If a tool call fails, analyze the error before retrying with a different approach.
 - Ask for clarification when the request is ambiguous.
 
+## Response Format Rules
+- Be concise. Avoid unnecessary preambles like "Sure!", "Let me help you with that", "I'll do X now".
+- Don't repeat the user's request back to them.
+- Don't explain what you're about to do if it's obvious from the tool call.
+- Don't summarize what you just did unless the user asks for a summary.
+- Use bullet points for lists, not verbose paragraphs.
+- Avoid filler words and redundant explanations.
+
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
 
     @staticmethod
