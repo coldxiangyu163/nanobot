@@ -44,9 +44,16 @@ class Session:
         self.updated_at = datetime.now()
 
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
-        """Return unconsolidated messages for LLM input, aligned to a user turn."""
+        """Return unconsolidated messages for LLM input, aligned to a user turn.
+
+        - max_messages > 0: return last N messages
+        - max_messages <= 0: use default limit (100) to prevent loading all messages
+        """
         unconsolidated = self.messages[self.last_consolidated:]
-        sliced = unconsolidated[-max_messages:]
+        # When max_messages <= 0, use a reasonable default to avoid loading all messages
+        # This prevents issues when consolidation fails and all messages become "unconsolidated"
+        effective_max = max_messages if max_messages > 0 else 100
+        sliced = unconsolidated[-effective_max:]
 
         # Drop leading non-user messages to avoid orphaned tool_result blocks
         for i, m in enumerate(sliced):
